@@ -3,17 +3,19 @@ import asyncio
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime
 import logging
+import gc
 
 logger = logging.getLogger(__name__)
 
 class ExchangeManager:
     def __init__(self):
-        self.binance_spot = ccxt.binance({'enableRateLimit': True})
-        self.binance_futures = ccxt.binanceusdm({'enableRateLimit': True})
-        self.bybit_spot = ccxt.bybit({'enableRateLimit': True})
-        self.bybit_futures = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
-        self.gate_spot = ccxt.gate({'enableRateLimit': True})
-        self.gate_futures = ccxt.gate({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+        self.binance_spot = None
+        self.binance_futures = None
+        self.bybit_spot = None
+        self.bybit_futures = None
+        self.gate_spot = None
+        self.gate_futures = None
+        self.markets_loaded = False
         
     def _normalize_coin_name(self, coin: str) -> str:
         coin = coin.upper()
@@ -35,16 +37,32 @@ class ExchangeManager:
         if hours > 0:
             return f"{hours}h{minutes}m" if minutes > 0 else f"{hours}h"
         return f"{minutes}m"
+    
+    def _init_exchange(self, name: str):
+        if name == 'binance_spot' and not self.binance_spot:
+            self.binance_spot = ccxt.binance({'enableRateLimit': True})
+        elif name == 'binance_futures' and not self.binance_futures:
+            self.binance_futures = ccxt.binanceusdm({'enableRateLimit': True})
+        elif name == 'bybit_spot' and not self.bybit_spot:
+            self.bybit_spot = ccxt.bybit({'enableRateLimit': True})
+        elif name == 'bybit_futures' and not self.bybit_futures:
+            self.bybit_futures = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+        elif name == 'gate_spot' and not self.gate_spot:
+            self.gate_spot = ccxt.gate({'enableRateLimit': True})
+        elif name == 'gate_futures' and not self.gate_futures:
+            self.gate_futures = ccxt.gate({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
         
-    async def get_binance_prices(self) -> Tuple[Dict[str, float], Dict[str, float]]:
+    async def get_binance_data(self) -> Tuple[List[Tuple[str, float, float, float, float, str]], None]:
         try:
             loop = asyncio.get_event_loop()
+            
+            self._init_exchange('binance_spot')
+            self._init_exchange('binance_futures')
             
             await loop.run_in_executor(None, self.binance_spot.load_markets)
             await loop.run_in_executor(None, self.binance_futures.load_markets)
             
             spot_tickers = await loop.run_in_executor(None, self.binance_spot.fetch_tickers)
-            futures_tickers = await loop.run_in_executor(None, self.binance_futures.fetch_tickers)
             
             spot_prices = {}
             for symbol, ticker in spot_tickers.items():
@@ -58,6 +76,11 @@ class ExchangeManager:
                             if price > 0 and 'UP' not in base and 'DOWN' not in base:
                                 spot_prices[base] = price
             
+            del spot_tickers
+            gc.collect()
+            
+            futures_tickers = await loop.run_in_executor(None, self.binance_futures.fetch_tickers)
+            
             futures_prices = {}
             for symbol, ticker in futures_tickers.items():
                 if symbol in self.binance_futures.markets:
@@ -70,44 +93,45 @@ class ExchangeManager:
                             if price > 0:
                                 futures_prices[base] = price
             
-            logger.info(f"Binance: {len(spot_prices)} spot, {len(futures_prices)} futures pairs")
-            return spot_prices, futures_prices
+            del futures_tickers
+            gc.collect()
+            
+            funding_rates = {}
+            try:
+                fr_data = await loop.run_in_executor(None, lambda: self.binance_futures.fetch_funding_rates())
+                for symbol, data in fr_data.items():
+                    if symbol in self.binance_futures.markets:
+                        market = self.binance_futures.markets[symbol]
+                        if market.get('settle') == 'USDT' and market.get('linear', False):
+                            base = market.get('base', '')
+                            if base:
+                                base = self._normalize_coin_name(base)
+                                rate = data.get('fundingRate', 0) or 0
+                                next_time = data.get('fundingTimestamp')
+                                time_str = self._time_until_funding(next_time)
+                                funding_rates[base] = (rate * 100, time_str)
+                del fr_data
+                gc.collect()
+            except Exception as e:
+                logger.error(f"Error fetching Binance funding rates: {e}")
+            
+            deviations = self._calculate_deviations(spot_prices, futures_prices, funding_rates)
+            
+            del spot_prices, futures_prices, funding_rates
+            gc.collect()
+            
+            logger.info(f"Binance: {len(deviations)} deviations calculated")
+            return deviations
         except Exception as e:
-            logger.error(f"Error fetching Binance prices: {e}")
-            return {}, {}
+            logger.error(f"Error fetching Binance data: {e}")
+            return []
     
-    async def get_binance_funding_rates(self) -> Dict[str, Tuple[float, str]]:
+    async def get_bybit_data(self) -> List[Tuple[str, float, float, float, float, str]]:
         try:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self.binance_futures.load_markets)
             
-            funding_rates = await loop.run_in_executor(
-                None, 
-                lambda: self.binance_futures.fetch_funding_rates()
-            )
-            
-            result = {}
-            for symbol, data in funding_rates.items():
-                if symbol in self.binance_futures.markets:
-                    market = self.binance_futures.markets[symbol]
-                    if market.get('settle') == 'USDT' and market.get('linear', False):
-                        base = market.get('base', '')
-                        if base:
-                            base = self._normalize_coin_name(base)
-                            rate = data.get('fundingRate', 0) or 0
-                            next_time = data.get('fundingTimestamp')
-                            time_str = self._time_until_funding(next_time)
-                            result[base] = (rate * 100, time_str)
-            
-            logger.info(f"Binance: {len(result)} funding rates fetched")
-            return result
-        except Exception as e:
-            logger.error(f"Error fetching Binance funding rates: {e}")
-            return {}
-    
-    async def get_bybit_prices(self) -> Tuple[Dict[str, float], Dict[str, float]]:
-        try:
-            loop = asyncio.get_event_loop()
+            self._init_exchange('bybit_spot')
+            self._init_exchange('bybit_futures')
             
             try:
                 await loop.run_in_executor(None, self.bybit_spot.load_markets)
@@ -115,15 +139,10 @@ class ExchangeManager:
             except Exception as e:
                 if '403' in str(e) or 'Forbidden' in str(e):
                     logger.error("Bybit API blocked from this region (403 Forbidden)")
-                    return {}, {}
+                    return []
                 raise
             
-            logger.info(f"Bybit markets loaded: spot={len(self.bybit_spot.markets)}, futures={len(self.bybit_futures.markets)}")
-            
             spot_tickers = await loop.run_in_executor(None, lambda: self.bybit_spot.fetch_tickers(params={'type': 'spot'}))
-            futures_tickers = await loop.run_in_executor(None, lambda: self.bybit_futures.fetch_tickers(params={'type': 'swap'}))
-            
-            logger.info(f"Bybit tickers fetched: spot={len(spot_tickers)}, futures={len(futures_tickers)}")
             
             spot_prices = {}
             for symbol, ticker in spot_tickers.items():
@@ -142,6 +161,11 @@ class ExchangeManager:
                             if price > 0 and 'UP' not in base and 'DOWN' not in base:
                                 spot_prices[base] = price
             
+            del spot_tickers
+            gc.collect()
+            
+            futures_tickers = await loop.run_in_executor(None, lambda: self.bybit_futures.fetch_tickers(params={'type': 'swap'}))
+            
             futures_prices = {}
             for symbol, ticker in futures_tickers.items():
                 if symbol in self.bybit_futures.markets:
@@ -158,54 +182,50 @@ class ExchangeManager:
                             if price > 0:
                                 futures_prices[base] = price
             
-            logger.info(f"Bybit: {len(spot_prices)} spot, {len(futures_prices)} futures pairs after filtering")
-            return spot_prices, futures_prices
+            del futures_tickers
+            gc.collect()
+            
+            funding_rates = {}
+            try:
+                fr_data = await loop.run_in_executor(None, lambda: self.bybit_futures.fetch_funding_rates(params={'type': 'swap'}))
+                for symbol, data in fr_data.items():
+                    if symbol in self.bybit_futures.markets:
+                        market = self.bybit_futures.markets[symbol]
+                        if market.get('settle') == 'USDT' and market.get('type') == 'swap':
+                            base = market.get('base', '')
+                            if base:
+                                base = self._normalize_coin_name(base)
+                                rate = data.get('fundingRate', 0) or 0
+                                next_time = data.get('fundingTimestamp')
+                                time_str = self._time_until_funding(next_time)
+                                funding_rates[base] = (rate * 100, time_str)
+                del fr_data
+                gc.collect()
+            except Exception as e:
+                logger.error(f"Error fetching Bybit funding rates: {e}")
+            
+            deviations = self._calculate_deviations(spot_prices, futures_prices, funding_rates)
+            
+            del spot_prices, futures_prices, funding_rates
+            gc.collect()
+            
+            logger.info(f"Bybit: {len(deviations)} deviations calculated")
+            return deviations
         except Exception as e:
-            logger.error(f"Error fetching Bybit prices: {e}", exc_info=True)
-            return {}, {}
+            logger.error(f"Error fetching Bybit data: {e}", exc_info=True)
+            return []
     
-    async def get_bybit_funding_rates(self) -> Dict[str, Tuple[float, str]]:
+    async def get_gate_data(self) -> List[Tuple[str, float, float, float, float, str]]:
         try:
             loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self.bybit_futures.load_markets)
             
-            funding_rates = await loop.run_in_executor(
-                None, 
-                lambda: self.bybit_futures.fetch_funding_rates(params={'type': 'swap'})
-            )
-            
-            result = {}
-            for symbol, data in funding_rates.items():
-                if symbol in self.bybit_futures.markets:
-                    market = self.bybit_futures.markets[symbol]
-                    if market.get('settle') == 'USDT' and market.get('type') == 'swap':
-                        base = market.get('base', '')
-                        if base:
-                            base = self._normalize_coin_name(base)
-                            rate = data.get('fundingRate', 0) or 0
-                            next_time = data.get('fundingTimestamp')
-                            time_str = self._time_until_funding(next_time)
-                            result[base] = (rate * 100, time_str)
-            
-            logger.info(f"Bybit: {len(result)} funding rates fetched")
-            return result
-        except Exception as e:
-            logger.error(f"Error fetching Bybit funding rates: {e}")
-            return {}
-    
-    async def get_gate_prices(self) -> Tuple[Dict[str, float], Dict[str, float]]:
-        try:
-            loop = asyncio.get_event_loop()
+            self._init_exchange('gate_spot')
+            self._init_exchange('gate_futures')
             
             await loop.run_in_executor(None, self.gate_spot.load_markets)
             await loop.run_in_executor(None, self.gate_futures.load_markets)
             
-            logger.info(f"Gate markets loaded: spot={len(self.gate_spot.markets)}, futures={len(self.gate_futures.markets)}")
-            
             spot_tickers = await loop.run_in_executor(None, self.gate_spot.fetch_tickers)
-            futures_tickers = await loop.run_in_executor(None, self.gate_futures.fetch_tickers)
-            
-            logger.info(f"Gate tickers fetched: spot={len(spot_tickers)}, futures={len(futures_tickers)}")
             
             spot_prices = {}
             for symbol, ticker in spot_tickers.items():
@@ -224,6 +244,11 @@ class ExchangeManager:
                             if price > 0 and 'UP' not in base and 'DOWN' not in base:
                                 spot_prices[base] = price
             
+            del spot_tickers
+            gc.collect()
+            
+            futures_tickers = await loop.run_in_executor(None, self.gate_futures.fetch_tickers)
+            
             futures_prices = {}
             for symbol, ticker in futures_tickers.items():
                 if symbol in self.gate_futures.markets:
@@ -240,44 +265,42 @@ class ExchangeManager:
                             if price > 0:
                                 futures_prices[base] = price
             
-            logger.info(f"Gate: {len(spot_prices)} spot, {len(futures_prices)} futures pairs after filtering")
-            return spot_prices, futures_prices
+            del futures_tickers
+            gc.collect()
+            
+            funding_rates = {}
+            try:
+                fr_data = await loop.run_in_executor(None, lambda: self.gate_futures.fetch_funding_rates())
+                for symbol, data in fr_data.items():
+                    if symbol in self.gate_futures.markets:
+                        market = self.gate_futures.markets[symbol]
+                        if market.get('settle') == 'USDT' and market.get('type') == 'swap':
+                            base = market.get('base', '')
+                            if base:
+                                base = self._normalize_coin_name(base)
+                                rate = data.get('fundingRate', 0) or 0
+                                next_time = data.get('fundingTimestamp')
+                                time_str = self._time_until_funding(next_time)
+                                funding_rates[base] = (rate * 100, time_str)
+                del fr_data
+                gc.collect()
+            except Exception as e:
+                logger.error(f"Error fetching Gate funding rates: {e}")
+            
+            deviations = self._calculate_deviations(spot_prices, futures_prices, funding_rates)
+            
+            del spot_prices, futures_prices, funding_rates
+            gc.collect()
+            
+            logger.info(f"Gate: {len(deviations)} deviations calculated")
+            return deviations
         except Exception as e:
-            logger.error(f"Error fetching Gate prices: {e}", exc_info=True)
-            return {}, {}
+            logger.error(f"Error fetching Gate data: {e}", exc_info=True)
+            return []
     
-    async def get_gate_funding_rates(self) -> Dict[str, Tuple[float, str]]:
-        try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self.gate_futures.load_markets)
-            
-            funding_rates = await loop.run_in_executor(
-                None, 
-                lambda: self.gate_futures.fetch_funding_rates()
-            )
-            
-            result = {}
-            for symbol, data in funding_rates.items():
-                if symbol in self.gate_futures.markets:
-                    market = self.gate_futures.markets[symbol]
-                    if market.get('settle') == 'USDT' and market.get('type') == 'swap':
-                        base = market.get('base', '')
-                        if base:
-                            base = self._normalize_coin_name(base)
-                            rate = data.get('fundingRate', 0) or 0
-                            next_time = data.get('fundingTimestamp')
-                            time_str = self._time_until_funding(next_time)
-                            result[base] = (rate * 100, time_str)
-            
-            logger.info(f"Gate: {len(result)} funding rates fetched")
-            return result
-        except Exception as e:
-            logger.error(f"Error fetching Gate funding rates: {e}")
-            return {}
-    
-    def calculate_deviations(self, spot_prices: Dict[str, float], 
-                            futures_prices: Dict[str, float],
-                            funding_rates: Dict[str, Tuple[float, str]]) -> List[Tuple[str, float, float, float, float, str]]:
+    def _calculate_deviations(self, spot_prices: Dict[str, float], 
+                             futures_prices: Dict[str, float],
+                             funding_rates: Dict[str, Tuple[float, str]]) -> List[Tuple[str, float, float, float, float, str]]:
         deviations = []
         common_coins = set(spot_prices.keys()) & set(futures_prices.keys())
         
@@ -289,8 +312,6 @@ class ExchangeManager:
                 if abs(deviation) <= 20.0:
                     fr_rate, fr_time = funding_rates.get(coin, (0.0, "8h"))
                     deviations.append((coin, spot, futures, deviation, fr_rate, fr_time))
-                else:
-                    logger.warning(f"Large deviation filtered: {coin} spot={spot} futures={futures} dev={deviation:.2f}%")
         
         deviations.sort(key=lambda x: abs(x[3]), reverse=True)
         return deviations
@@ -299,52 +320,18 @@ class ExchangeManager:
                                   bybit_enabled: bool = True,
                                   gate_enabled: bool = True) -> Dict[str, List[Tuple[str, float, float, float, float, str]]]:
         results = {}
-        price_tasks = []
-        funding_tasks = []
-        task_names = []
         
         if binance_enabled:
-            price_tasks.append(self.get_binance_prices())
-            funding_tasks.append(self.get_binance_funding_rates())
-            task_names.append('binance')
+            results['binance'] = await self.get_binance_data()
+            gc.collect()
         
         if bybit_enabled:
-            price_tasks.append(self.get_bybit_prices())
-            funding_tasks.append(self.get_bybit_funding_rates())
-            task_names.append('bybit')
+            results['bybit'] = await self.get_bybit_data()
+            gc.collect()
         
         if gate_enabled:
-            price_tasks.append(self.get_gate_prices())
-            funding_tasks.append(self.get_gate_funding_rates())
-            task_names.append('gate')
-        
-        if price_tasks:
-            all_tasks = price_tasks + funding_tasks
-            fetched = await asyncio.gather(*all_tasks, return_exceptions=True)
-            
-            num_exchanges = len(task_names)
-            price_results = fetched[:num_exchanges]
-            funding_results = fetched[num_exchanges:]
-            
-            for i, name in enumerate(task_names):
-                price_result = price_results[i]
-                funding_result = funding_results[i]
-                
-                if isinstance(price_result, Exception):
-                    logger.error(f"Error fetching {name} prices: {price_result}")
-                    results[name] = []
-                else:
-                    spot, futures = price_result
-                    
-                    if isinstance(funding_result, Exception):
-                        logger.error(f"Error fetching {name} funding: {funding_result}")
-                        funding_rates = {}
-                    else:
-                        funding_rates = funding_result
-                    
-                    deviations = self.calculate_deviations(spot, futures, funding_rates)
-                    logger.info(f"{name}: {len(deviations)} deviations calculated")
-                    results[name] = deviations
+            results['gate'] = await self.get_gate_data()
+            gc.collect()
         
         return results
 
