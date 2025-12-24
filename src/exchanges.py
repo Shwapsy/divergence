@@ -74,7 +74,7 @@ class ExchangeManager:
             for symbol, ticker in spot_tickers.items():
                 if symbol in self.bybit_spot.markets:
                     market = self.bybit_spot.markets[symbol]
-                    if market.get('quote') == 'USDT' and market.get('active', True) and market.get('spot', False):
+                    if market.get('quote') == 'USDT' and market.get('active', True) and market.get('type') == 'spot':
                         base = market.get('base', '')
                         if ticker.get('last') and base:
                             base = self._normalize_coin_name(base)
@@ -86,7 +86,7 @@ class ExchangeManager:
             for symbol, ticker in futures_tickers.items():
                 if symbol in self.bybit_futures.markets:
                     market = self.bybit_futures.markets[symbol]
-                    if market.get('settle') == 'USDT' and market.get('active', True) and market.get('linear', False):
+                    if market.get('settle') == 'USDT' and market.get('active', True) and market.get('type') == 'swap':
                         base = market.get('base', '')
                         if ticker.get('last') and base:
                             base = self._normalize_coin_name(base)
