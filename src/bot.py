@@ -1,12 +1,19 @@
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, 
     ContextTypes, MessageHandler, filters
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import Response, PlainTextResponse
+from starlette.routing import Route
 
 from src.config import (
     TELEGRAM_BOT_TOKEN, load_settings, save_settings,
@@ -23,7 +30,11 @@ logger = logging.getLogger(__name__)
 settings = load_settings()
 muted_coins = load_muted_coins()
 scheduler = AsyncIOScheduler()
-app_instance = None
+application = None
+
+PORT = int(os.environ.get("PORT", 5000))
+WEBHOOK_PATH = "/webhook"
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 def get_main_keyboard():
     keyboard = [
@@ -305,7 +316,7 @@ def is_muted(coin: str) -> bool:
     return True
 
 async def check_and_alert():
-    global settings, app_instance
+    global settings, application
     
     if not settings["chat_ids"]:
         return
@@ -328,11 +339,11 @@ async def check_and_alert():
                     sign = "+" if dev > 0 else ""
                     alerts.append(f"🚨 *{exchange.upper()}* | {coin}: {sign}{dev:.2f}%")
         
-        if alerts and app_instance:
+        if alerts and application:
             message = "⚠️ *Сигнал отклонения!*\n\n" + "\n".join(alerts[:15])
             for chat_id in settings["chat_ids"]:
                 try:
-                    await app_instance.bot.send_message(
+                    await application.bot.send_message(
                         chat_id=chat_id,
                         text=message,
                         parse_mode="Markdown"
@@ -371,31 +382,68 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_main_keyboard()
     )
 
-async def post_init(application):
-    global scheduler
-    scheduler.start()
-    reschedule_checker()
-    logger.info("Scheduler started!")
+async def telegram_webhook(request: Request) -> Response:
+    global application
+    try:
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+        return Response(status_code=200)
+    except Exception as e:
+        logger.error(f"Error processing webhook: {e}")
+        return Response(status_code=500)
 
-def run_bot():
-    global app_instance, scheduler
+async def health_check(request: Request) -> PlainTextResponse:
+    return PlainTextResponse("OK")
+
+async def home(request: Request) -> PlainTextResponse:
+    return PlainTextResponse("Futures-Spot Deviation Scanner Bot is running!")
+
+@asynccontextmanager
+async def lifespan(app: Starlette):
+    global application, scheduler
     
     if not TELEGRAM_BOT_TOKEN:
         logger.error("TELEGRAM_BOT_TOKEN not set!")
-        print("❌ Ошибка: установите TELEGRAM_BOT_TOKEN в переменных окружения")
+        yield
         return
     
-    app_instance = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     
-    app_instance.add_handler(CommandHandler("start", start))
-    app_instance.add_handler(CommandHandler("status", status_command))
-    app_instance.add_handler(CommandHandler("mute", mute_command))
-    app_instance.add_handler(CallbackQueryHandler(button_callback))
-    app_instance.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("mute", mute_command))
+    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    logger.info("Bot started!")
-    print("✅ Бот запущен!")
-    app_instance.run_polling(allowed_updates=Update.ALL_TYPES)
+    await application.initialize()
+    await application.start()
+    
+    if RENDER_EXTERNAL_URL:
+        webhook_url = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
+        await application.bot.set_webhook(webhook_url)
+        logger.info(f"Webhook set to: {webhook_url}")
+    else:
+        logger.warning("RENDER_EXTERNAL_URL not set, webhook not configured")
+    
+    scheduler.start()
+    reschedule_checker()
+    logger.info("Bot started with webhook mode!")
+    
+    yield
+    
+    scheduler.shutdown()
+    await application.stop()
+    await application.shutdown()
+    logger.info("Bot stopped")
 
-if __name__ == "__main__":
-    run_bot()
+routes = [
+    Route("/", home),
+    Route("/health", health_check),
+    Route(WEBHOOK_PATH, telegram_webhook, methods=["POST"]),
+]
+
+app = Starlette(debug=False, routes=routes, lifespan=lifespan)
+
+def create_app():
+    return app
