@@ -17,6 +17,7 @@ DEFAULT_SETTINGS = {
     "check_interval_seconds": 60,
     "binance_enabled": True,
     "bybit_enabled": True,
+    "gate_enabled": True,
     "chat_ids": []
 }
 
