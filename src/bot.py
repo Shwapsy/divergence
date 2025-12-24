@@ -318,10 +318,14 @@ def is_muted(coin: str) -> bool:
 async def check_and_alert():
     global settings, application
     
+    logger.info(f"check_and_alert started. chat_ids: {settings['chat_ids']}, threshold: {settings['threshold_percent']}%")
+    
     if not settings["chat_ids"]:
+        logger.info("No chat_ids registered, skipping alerts")
         return
     
     if not settings.get("binance_enabled", True) and not settings.get("bybit_enabled", True):
+        logger.info("Both exchanges disabled, skipping")
         return
     
     try:
@@ -333,11 +337,16 @@ async def check_and_alert():
         threshold = settings["threshold_percent"]
         alerts = []
         
+        total_pairs = sum(len(data) for data in deviations.values())
+        logger.info(f"Fetched {total_pairs} pairs total")
+        
         for exchange, data in deviations.items():
             for coin, spot, futures, dev in data:
                 if abs(dev) >= threshold and not is_muted(coin):
                     sign = "+" if dev > 0 else ""
                     alerts.append(f"🚨 *{exchange.upper()}* | {coin}: {sign}{dev:.2f}%")
+        
+        logger.info(f"Found {len(alerts)} alerts above threshold {threshold}%")
         
         if alerts and application:
             message = "⚠️ *Сигнал отклонения!*\n\n" + "\n".join(alerts[:15])
@@ -348,6 +357,7 @@ async def check_and_alert():
                         text=message,
                         parse_mode="Markdown"
                     )
+                    logger.info(f"Alert sent to {chat_id}")
                 except Exception as e:
                     logger.error(f"Error sending alert to {chat_id}: {e}")
     except Exception as e:
