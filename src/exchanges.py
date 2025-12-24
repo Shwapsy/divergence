@@ -64,17 +64,31 @@ class ExchangeManager:
         try:
             loop = asyncio.get_event_loop()
             
-            await loop.run_in_executor(None, self.bybit_spot.load_markets)
-            await loop.run_in_executor(None, self.bybit_futures.load_markets)
+            try:
+                await loop.run_in_executor(None, self.bybit_spot.load_markets)
+                await loop.run_in_executor(None, self.bybit_futures.load_markets)
+            except Exception as e:
+                if '403' in str(e) or 'Forbidden' in str(e):
+                    logger.error("Bybit API blocked from this region (403 Forbidden)")
+                    return {}, {}
+                raise
+            
+            logger.info(f"Bybit markets loaded: spot={len(self.bybit_spot.markets)}, futures={len(self.bybit_futures.markets)}")
             
             spot_tickers = await loop.run_in_executor(None, self.bybit_spot.fetch_tickers)
             futures_tickers = await loop.run_in_executor(None, self.bybit_futures.fetch_tickers)
+            
+            logger.info(f"Bybit tickers fetched: spot={len(spot_tickers)}, futures={len(futures_tickers)}")
             
             spot_prices = {}
             for symbol, ticker in spot_tickers.items():
                 if symbol in self.bybit_spot.markets:
                     market = self.bybit_spot.markets[symbol]
-                    if market.get('quote') == 'USDT' and market.get('active', True) and market.get('type') == 'spot':
+                    quote = market.get('quote')
+                    active = market.get('active')
+                    mtype = market.get('type')
+                    
+                    if quote == 'USDT' and active is not False and mtype == 'spot':
                         base = market.get('base', '')
                         if ticker.get('last') and base:
                             base = self._normalize_coin_name(base)
@@ -86,7 +100,11 @@ class ExchangeManager:
             for symbol, ticker in futures_tickers.items():
                 if symbol in self.bybit_futures.markets:
                     market = self.bybit_futures.markets[symbol]
-                    if market.get('settle') == 'USDT' and market.get('active', True) and market.get('type') == 'swap':
+                    settle = market.get('settle')
+                    active = market.get('active')
+                    mtype = market.get('type')
+                    
+                    if settle == 'USDT' and active is not False and mtype == 'swap':
                         base = market.get('base', '')
                         if ticker.get('last') and base:
                             base = self._normalize_coin_name(base)
@@ -94,10 +112,10 @@ class ExchangeManager:
                             if price > 0:
                                 futures_prices[base] = price
             
-            logger.info(f"Bybit: {len(spot_prices)} spot, {len(futures_prices)} futures pairs")
+            logger.info(f"Bybit: {len(spot_prices)} spot, {len(futures_prices)} futures pairs after filtering")
             return spot_prices, futures_prices
         except Exception as e:
-            logger.error(f"Error fetching Bybit prices: {e}")
+            logger.error(f"Error fetching Bybit prices: {e}", exc_info=True)
             return {}, {}
     
     def calculate_deviations(self, spot_prices: Dict[str, float], 
@@ -140,7 +158,9 @@ class ExchangeManager:
                     results[name] = []
                 else:
                     spot, futures = result
-                    results[name] = self.calculate_deviations(spot, futures)
+                    deviations = self.calculate_deviations(spot, futures)
+                    logger.info(f"{name}: {len(deviations)} deviations calculated")
+                    results[name] = deviations
         
         return results
 
