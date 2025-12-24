@@ -11,6 +11,8 @@ class ExchangeManager:
         self.binance_futures = ccxt.binanceusdm({'enableRateLimit': True})
         self.bybit_spot = ccxt.bybit({'enableRateLimit': True})
         self.bybit_futures = ccxt.bybit({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
+        self.gate_spot = ccxt.gate({'enableRateLimit': True})
+        self.gate_futures = ccxt.gate({'enableRateLimit': True, 'options': {'defaultType': 'swap'}})
         
     def _normalize_coin_name(self, coin: str) -> str:
         coin = coin.upper()
@@ -81,7 +83,6 @@ class ExchangeManager:
             logger.info(f"Bybit tickers fetched: spot={len(spot_tickers)}, futures={len(futures_tickers)}")
             
             spot_prices = {}
-            spot_types_seen = set()
             for symbol, ticker in spot_tickers.items():
                 if symbol in self.bybit_spot.markets:
                     market = self.bybit_spot.markets[symbol]
@@ -90,9 +91,6 @@ class ExchangeManager:
                     mtype = market.get('type')
                     spot_flag = market.get('spot')
                     
-                    if quote == 'USDT':
-                        spot_types_seen.add(f"type={mtype},spot={spot_flag}")
-                    
                     if quote == 'USDT' and active is not False and (mtype == 'spot' or spot_flag == True):
                         base = market.get('base', '')
                         if ticker.get('last') and base:
@@ -100,9 +98,6 @@ class ExchangeManager:
                             price = float(ticker['last'])
                             if price > 0 and 'UP' not in base and 'DOWN' not in base:
                                 spot_prices[base] = price
-            
-            if spot_types_seen:
-                logger.info(f"Bybit spot market types seen: {list(spot_types_seen)[:5]}")
             
             futures_prices = {}
             for symbol, ticker in futures_tickers.items():
@@ -126,6 +121,59 @@ class ExchangeManager:
             logger.error(f"Error fetching Bybit prices: {e}", exc_info=True)
             return {}, {}
     
+    async def get_gate_prices(self) -> Tuple[Dict[str, float], Dict[str, float]]:
+        try:
+            loop = asyncio.get_event_loop()
+            
+            await loop.run_in_executor(None, self.gate_spot.load_markets)
+            await loop.run_in_executor(None, self.gate_futures.load_markets)
+            
+            logger.info(f"Gate markets loaded: spot={len(self.gate_spot.markets)}, futures={len(self.gate_futures.markets)}")
+            
+            spot_tickers = await loop.run_in_executor(None, self.gate_spot.fetch_tickers)
+            futures_tickers = await loop.run_in_executor(None, self.gate_futures.fetch_tickers)
+            
+            logger.info(f"Gate tickers fetched: spot={len(spot_tickers)}, futures={len(futures_tickers)}")
+            
+            spot_prices = {}
+            for symbol, ticker in spot_tickers.items():
+                if symbol in self.gate_spot.markets:
+                    market = self.gate_spot.markets[symbol]
+                    quote = market.get('quote')
+                    active = market.get('active')
+                    mtype = market.get('type')
+                    spot_flag = market.get('spot')
+                    
+                    if quote == 'USDT' and active is not False and (mtype == 'spot' or spot_flag == True):
+                        base = market.get('base', '')
+                        if ticker.get('last') and base:
+                            base = self._normalize_coin_name(base)
+                            price = float(ticker['last'])
+                            if price > 0 and 'UP' not in base and 'DOWN' not in base:
+                                spot_prices[base] = price
+            
+            futures_prices = {}
+            for symbol, ticker in futures_tickers.items():
+                if symbol in self.gate_futures.markets:
+                    market = self.gate_futures.markets[symbol]
+                    settle = market.get('settle')
+                    active = market.get('active')
+                    mtype = market.get('type')
+                    
+                    if settle == 'USDT' and active is not False and mtype == 'swap':
+                        base = market.get('base', '')
+                        if ticker.get('last') and base:
+                            base = self._normalize_coin_name(base)
+                            price = float(ticker['last'])
+                            if price > 0:
+                                futures_prices[base] = price
+            
+            logger.info(f"Gate: {len(spot_prices)} spot, {len(futures_prices)} futures pairs after filtering")
+            return spot_prices, futures_prices
+        except Exception as e:
+            logger.error(f"Error fetching Gate prices: {e}", exc_info=True)
+            return {}, {}
+    
     def calculate_deviations(self, spot_prices: Dict[str, float], 
                             futures_prices: Dict[str, float]) -> List[Tuple[str, float, float, float]]:
         deviations = []
@@ -145,7 +193,8 @@ class ExchangeManager:
         return deviations
     
     async def get_all_deviations(self, binance_enabled: bool = True, 
-                                  bybit_enabled: bool = True) -> Dict[str, List[Tuple[str, float, float, float]]]:
+                                  bybit_enabled: bool = True,
+                                  gate_enabled: bool = True) -> Dict[str, List[Tuple[str, float, float, float]]]:
         results = {}
         tasks = []
         task_names = []
@@ -157,6 +206,10 @@ class ExchangeManager:
         if bybit_enabled:
             tasks.append(self.get_bybit_prices())
             task_names.append('bybit')
+        
+        if gate_enabled:
+            tasks.append(self.get_gate_prices())
+            task_names.append('gate')
         
         if tasks:
             fetched = await asyncio.gather(*tasks, return_exceptions=True)
