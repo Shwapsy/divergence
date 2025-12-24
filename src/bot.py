@@ -48,10 +48,12 @@ def get_settings_keyboard():
     global settings
     binance_status = "✅" if settings.get("binance_enabled", True) else "❌"
     bybit_status = "✅" if settings.get("bybit_enabled", True) else "❌"
+    gate_status = "✅" if settings.get("gate_enabled", True) else "❌"
     
     keyboard = [
         [InlineKeyboardButton(f"Binance: {binance_status}", callback_data="toggle_binance")],
         [InlineKeyboardButton(f"Bybit: {bybit_status}", callback_data="toggle_bybit")],
+        [InlineKeyboardButton(f"Gate: {gate_status}", callback_data="toggle_gate")],
         [InlineKeyboardButton(f"Порог: {settings['threshold_percent']}%", callback_data="set_threshold")],
         [InlineKeyboardButton(f"Интервал: {settings['check_interval_seconds']}с", callback_data="set_interval")],
         [InlineKeyboardButton("🔙 Назад", callback_data="back_to_main")]
@@ -111,6 +113,16 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_settings_keyboard()
         )
     
+    elif query.data == "toggle_gate":
+        settings["gate_enabled"] = not settings.get("gate_enabled", True)
+        save_settings(settings)
+        await query.edit_message_text(
+            "⚙️ *Настройки*\n\n"
+            f"Gate {'включен' if settings['gate_enabled'] else 'отключен'}",
+            parse_mode="Markdown",
+            reply_markup=get_settings_keyboard()
+        )
+    
     elif query.data == "set_threshold":
         context.user_data["waiting_for"] = "threshold"
         await query.edit_message_text(
@@ -153,7 +165,8 @@ async def show_deviations_handler(query):
     try:
         deviations = await exchange_manager.get_all_deviations(
             binance_enabled=settings.get("binance_enabled", True),
-            bybit_enabled=settings.get("bybit_enabled", True)
+            bybit_enabled=settings.get("bybit_enabled", True),
+            gate_enabled=settings.get("gate_enabled", True)
         )
         
         if not deviations or all(len(d) == 0 for d in deviations.values()):
@@ -166,13 +179,15 @@ async def show_deviations_handler(query):
         message = "📊 *Текущие отклонения (Топ-20)*\n\n"
         
         for exchange, data in deviations.items():
+            message += f"*{exchange.upper()}*:\n"
             if data:
-                message += f"*{exchange.upper()}*:\n"
                 for coin, spot, futures, dev in data[:10]:
                     sign = "+" if dev > 0 else ""
                     emoji = "🔴" if abs(dev) >= settings["threshold_percent"] else "⚪"
                     message += f"{emoji} {coin}: {sign}{dev:.2f}%\n"
-                message += "\n"
+            else:
+                message += "⚠️ Нет данных (API недоступен)\n"
+            message += "\n"
         
         await query.edit_message_text(
             message,
@@ -324,14 +339,15 @@ async def check_and_alert():
         logger.info("No chat_ids registered, skipping alerts")
         return
     
-    if not settings.get("binance_enabled", True) and not settings.get("bybit_enabled", True):
-        logger.info("Both exchanges disabled, skipping")
+    if not settings.get("binance_enabled", True) and not settings.get("bybit_enabled", True) and not settings.get("gate_enabled", True):
+        logger.info("All exchanges disabled, skipping")
         return
     
     try:
         deviations = await exchange_manager.get_all_deviations(
             binance_enabled=settings.get("binance_enabled", True),
-            bybit_enabled=settings.get("bybit_enabled", True)
+            bybit_enabled=settings.get("bybit_enabled", True),
+            gate_enabled=settings.get("gate_enabled", True)
         )
         
         threshold = settings["threshold_percent"]
@@ -380,11 +396,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global settings
     binance = "✅" if settings.get("binance_enabled", True) else "❌"
     bybit = "✅" if settings.get("bybit_enabled", True) else "❌"
+    gate = "✅" if settings.get("gate_enabled", True) else "❌"
     
     await update.message.reply_text(
         f"📊 *Статус бота*\n\n"
         f"Binance: {binance}\n"
         f"Bybit: {bybit}\n"
+        f"Gate: {gate}\n"
         f"Порог: {settings['threshold_percent']}%\n"
         f"Интервал: {settings['check_interval_seconds']} сек\n"
         f"Замьючено монет: {len(muted_coins)}",
