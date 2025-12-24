@@ -181,10 +181,11 @@ async def show_deviations_handler(query):
         for exchange, data in deviations.items():
             message += f"*{exchange.upper()}*:\n"
             if data:
-                for coin, spot, futures, dev in data[:10]:
+                for coin, spot, futures, dev, fr_rate, fr_time in data[:10]:
                     sign = "+" if dev > 0 else ""
                     emoji = "🔴" if abs(dev) >= settings["threshold_percent"] else "⚪"
-                    message += f"{emoji} {coin}: {sign}{dev:.2f}%\n"
+                    fr_sign = "+" if fr_rate >= 0 else ""
+                    message += f"{emoji} {coin}: {sign}{dev:.2f}% | FR: {fr_sign}{fr_rate:.3f}% ({fr_time})\n"
             else:
                 message += "⚠️ Нет данных (API недоступен)\n"
             message += "\n"
@@ -357,10 +358,11 @@ async def check_and_alert():
         logger.info(f"Fetched {total_pairs} pairs total")
         
         for exchange, data in deviations.items():
-            for coin, spot, futures, dev in data:
+            for coin, spot, futures, dev, fr_rate, fr_time in data:
                 if abs(dev) >= threshold and not is_muted(coin):
                     sign = "+" if dev > 0 else ""
-                    alerts.append(f"🚨 *{exchange.upper()}* | {coin}: {sign}{dev:.2f}%")
+                    fr_sign = "+" if fr_rate >= 0 else ""
+                    alerts.append(f"🚨 *{exchange.upper()}* | {coin}: {sign}{dev:.2f}% | FR: {fr_sign}{fr_rate:.3f}% ({fr_time})")
         
         logger.info(f"Found {len(alerts)} alerts above threshold {threshold}%")
         
