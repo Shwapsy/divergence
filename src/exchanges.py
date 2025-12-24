@@ -75,26 +75,34 @@ class ExchangeManager:
             
             logger.info(f"Bybit markets loaded: spot={len(self.bybit_spot.markets)}, futures={len(self.bybit_futures.markets)}")
             
-            spot_tickers = await loop.run_in_executor(None, self.bybit_spot.fetch_tickers)
-            futures_tickers = await loop.run_in_executor(None, self.bybit_futures.fetch_tickers)
+            spot_tickers = await loop.run_in_executor(None, lambda: self.bybit_spot.fetch_tickers(params={'type': 'spot'}))
+            futures_tickers = await loop.run_in_executor(None, lambda: self.bybit_futures.fetch_tickers(params={'type': 'swap'}))
             
             logger.info(f"Bybit tickers fetched: spot={len(spot_tickers)}, futures={len(futures_tickers)}")
             
             spot_prices = {}
+            spot_types_seen = set()
             for symbol, ticker in spot_tickers.items():
                 if symbol in self.bybit_spot.markets:
                     market = self.bybit_spot.markets[symbol]
                     quote = market.get('quote')
                     active = market.get('active')
                     mtype = market.get('type')
+                    spot_flag = market.get('spot')
                     
-                    if quote == 'USDT' and active is not False and mtype == 'spot':
+                    if quote == 'USDT':
+                        spot_types_seen.add(f"type={mtype},spot={spot_flag}")
+                    
+                    if quote == 'USDT' and active is not False and (mtype == 'spot' or spot_flag == True):
                         base = market.get('base', '')
                         if ticker.get('last') and base:
                             base = self._normalize_coin_name(base)
                             price = float(ticker['last'])
                             if price > 0 and 'UP' not in base and 'DOWN' not in base:
                                 spot_prices[base] = price
+            
+            if spot_types_seen:
+                logger.info(f"Bybit spot market types seen: {list(spot_types_seen)[:5]}")
             
             futures_prices = {}
             for symbol, ticker in futures_tickers.items():
