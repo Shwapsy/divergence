@@ -79,7 +79,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global settings, muted_coins
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except Exception:
+        pass
     
     if query.data == "show_deviations":
         await show_deviations_handler(query)
