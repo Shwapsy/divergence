@@ -163,9 +163,10 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_deviations_handler(query):
     global settings
-    await query.edit_message_text("⏳ Загрузка данных с бирж...")
+    await query.edit_message_text("⏳ Загрузка данных...")
     
     try:
+        # Теперь данные берутся из кэша WebSocket - моментально
         deviations = await exchange_manager.get_all_deviations(
             binance_enabled=settings.get("binance_enabled", True),
             bybit_enabled=settings.get("bybit_enabled", True),
@@ -174,7 +175,7 @@ async def show_deviations_handler(query):
         
         if not deviations or all(len(d) == 0 for d in deviations.values()):
             await query.edit_message_text(
-                "❌ Нет данных. Возможно, API бирж недоступен из текущего региона.",
+                "❌ Нет данных. WebSocket соединения могут ещё загружаться.",
                 reply_markup=get_main_keyboard()
             )
             return
@@ -189,7 +190,7 @@ async def show_deviations_handler(query):
                     emoji = "🔴" if abs(dev) >= settings["threshold_percent"] else "⚪"
                     message += f"{emoji} {coin}: {sign}{dev:.2f}%\n"
             else:
-                message += "⚠️ Нет данных (API недоступен)\n"
+                message += "⚠️ Нет данных\n"
             message += "\n"
         
         await query.edit_message_text(
@@ -347,6 +348,7 @@ async def check_and_alert():
         return
     
     try:
+        # Данные берутся из кэша WebSocket - никаких HTTP запросов
         deviations = await exchange_manager.get_all_deviations(
             binance_enabled=settings.get("binance_enabled", True),
             bybit_enabled=settings.get("bybit_enabled", True),
@@ -357,7 +359,7 @@ async def check_and_alert():
         alerts = []
         
         total_pairs = sum(len(data) for data in deviations.values())
-        logger.info(f"Fetched {total_pairs} pairs total")
+        logger.info(f"Fetched {total_pairs} pairs total from cache")
         
         for exchange, data in deviations.items():
             for coin, spot, futures, dev in data:
@@ -401,11 +403,16 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     bybit = "✅" if settings.get("bybit_enabled", True) else "❌"
     gate = "✅" if settings.get("gate_enabled", True) else "❌"
     
+    # Показываем количество пар в кэше
+    binance_count = len(exchange_manager.spot_prices.get('binance', {}))
+    bybit_count = len(exchange_manager.spot_prices.get('bybit', {}))
+    gate_count = len(exchange_manager.spot_prices.get('gate', {}))
+    
     await update.message.reply_text(
         f"📊 *Статус бота*\n\n"
-        f"Binance: {binance}\n"
-        f"Bybit: {bybit}\n"
-        f"Gate: {gate}\n"
+        f"Binance: {binance} ({binance_count} пар)\n"
+        f"Bybit: {bybit} ({bybit_count} пар)\n"
+        f"Gate: {gate} ({gate_count} пар)\n"
         f"Порог: {settings['threshold_percent']}%\n"
         f"Интервал: {settings['check_interval_seconds']} сек\n"
         f"Замьючено монет: {len(muted_coins)}",
@@ -450,6 +457,14 @@ async def lifespan(app: Starlette):
     await application.initialize()
     await application.start()
     
+    # НОВОЕ: Запуск WebSocket соединений
+    logger.info("Starting WebSocket connections...")
+    await exchange_manager.start_websockets()
+    
+    # Даём время для загрузки данных в кэш
+    logger.info("Waiting for initial data load...")
+    await asyncio.sleep(15)
+    
     if RENDER_EXTERNAL_URL:
         webhook_url = f"{RENDER_EXTERNAL_URL}{WEBHOOK_PATH}"
         await application.bot.set_webhook(webhook_url)
@@ -459,9 +474,13 @@ async def lifespan(app: Starlette):
     
     scheduler.start()
     reschedule_checker()
-    logger.info("Bot started with webhook mode!")
+    logger.info("Bot started with WebSocket mode!")
     
     yield
+    
+    # НОВОЕ: Остановка WebSocket соединений
+    logger.info("Stopping WebSocket connections...")
+    await exchange_manager.stop_websockets()
     
     scheduler.shutdown()
     await application.stop()
