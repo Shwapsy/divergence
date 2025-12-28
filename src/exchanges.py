@@ -25,9 +25,15 @@ class ExchangeManager:
     
     def _init_exchange(self, name: str):
         if name == 'binance_spot' and not self.binance_spot:
-            self.binance_spot = ccxt.binance({'enableRateLimit': True})
+            self.binance_spot = ccxt.binance({
+                'enableRateLimit': True,
+                'hostname': 'data-api.binance.vision'
+            })
         elif name == 'binance_futures' and not self.binance_futures:
-            self.binance_futures = ccxt.binanceusdm({'enableRateLimit': True})
+            self.binance_futures = ccxt.binanceusdm({
+                'enableRateLimit': True,
+                'hostname': 'fapi.binance.com'
+            })
         elif name == 'bybit_spot' and not self.bybit_spot:
             self.bybit_spot = ccxt.bybit({'enableRateLimit': True})
         elif name == 'bybit_futures' and not self.bybit_futures:
